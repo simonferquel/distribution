@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/docker/distribution"
 	dcontext "github.com/docker/distribution/context"
 	"github.com/docker/distribution/manifest"
+	"github.com/docker/distribution/manifest/generic"
 	"github.com/docker/distribution/manifest/manifestlist"
 	"github.com/docker/distribution/manifest/ocischema"
 	"github.com/docker/distribution/manifest/schema1"
@@ -52,6 +54,7 @@ type manifestStore struct {
 	schema2Handler      ManifestHandler
 	ocischemaHandler    ManifestHandler
 	manifestListHandler ManifestHandler
+	genericHandler      ManifestHandler
 }
 
 var _ distribution.ManifestService = &manifestStore{}
@@ -119,6 +122,9 @@ func (ms *manifestStore) Get(ctx context.Context, dgst digest.Digest, options ..
 			// Otherwise, assume it must be an image manifest
 			return ms.ocischemaHandler.Unmarshal(ctx, dgst, content)
 		default:
+			if strings.HasPrefix(versioned.MediaType, generic.GenericMediaTypePrefix) {
+				return ms.genericHandler.Unmarshal(ctx, dgst, content)
+			}
 			return nil, distribution.ErrManifestVerification{fmt.Errorf("unrecognized manifest content type %s", versioned.MediaType)}
 		}
 	}
@@ -138,6 +144,8 @@ func (ms *manifestStore) Put(ctx context.Context, manifest distribution.Manifest
 		return ms.ocischemaHandler.Put(ctx, manifest, ms.skipDependencyVerification)
 	case *manifestlist.DeserializedManifestList:
 		return ms.manifestListHandler.Put(ctx, manifest, ms.skipDependencyVerification)
+	case *generic.DeserializedManifest:
+		return ms.genericHandler.Put(ctx, manifest, ms.skipDependencyVerification)
 	}
 
 	return "", fmt.Errorf("unrecognized manifest type %T", manifest)

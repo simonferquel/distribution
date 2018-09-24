@@ -288,6 +288,11 @@ func (repo *repository) Manifests(ctx context.Context, options ...distribution.M
 			blobStore:    blobStore,
 			manifestURLs: repo.registry.manifestURLs,
 		},
+		genericHandler: &genericManifestHandler{
+			blobStore:  blobStore,
+			ctx:        ctx,
+			repository: repo,
+		},
 	}
 
 	// Apply options

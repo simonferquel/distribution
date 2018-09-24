@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"mime"
+	"sort"
+	"strings"
 
 	"github.com/opencontainers/go-digest"
 )
@@ -89,6 +91,22 @@ type UnmarshalFunc func([]byte) (Manifest, Descriptor, error)
 
 var mappings = make(map[string]UnmarshalFunc, 0)
 
+type genericUnmarshaller struct {
+	mediaTypePrefix string
+	f               UnmarshalFunc
+}
+
+var genericUnmarshallers []genericUnmarshaller
+
+func findGenericUnmarshaller(mediaType string) (UnmarshalFunc, bool) {
+	for _, genericUnmarshaller := range genericUnmarshallers {
+		if strings.HasPrefix(mediaType, genericUnmarshaller.mediaTypePrefix) {
+			return genericUnmarshaller.f, true
+		}
+	}
+	return nil, false
+}
+
 // UnmarshalManifest looks up manifest unmarshal functions based on
 // MediaType
 func UnmarshalManifest(ctHeader string, p []byte) (Manifest, Descriptor, error) {
@@ -105,9 +123,10 @@ func UnmarshalManifest(ctHeader string, p []byte) (Manifest, Descriptor, error) 
 
 	unmarshalFunc, ok := mappings[mediaType]
 	if !ok {
-		unmarshalFunc, ok = mappings[""]
-		if !ok {
-			return nil, Descriptor{}, fmt.Errorf("unsupported manifest media type and no default available: %s", mediaType)
+		if unmarshalFunc, ok = findGenericUnmarshaller(mediaType); !ok {
+			if unmarshalFunc, ok = mappings[""]; !ok {
+				return nil, Descriptor{}, fmt.Errorf("unsupported manifest media type and no default available: %s", mediaType)
+			}
 		}
 	}
 
@@ -121,5 +140,28 @@ func RegisterManifestSchema(mediaType string, u UnmarshalFunc) error {
 		return fmt.Errorf("manifest media type registration would overwrite existing: %s", mediaType)
 	}
 	mappings[mediaType] = u
+	return nil
+}
+
+// RegisterGenericManifestSchema registers a generic schema unmarshaller for a given media type prefix
+func RegisterGenericManifestSchema(mediaTypePrefix string, u UnmarshalFunc) error {
+	for _, registered := range genericUnmarshallers {
+		if registered.mediaTypePrefix == mediaTypePrefix {
+			return fmt.Errorf("manifest media type generic registration would overwrite existing: %s", mediaTypePrefix)
+		}
+	}
+	genericUnmarshallers = append(genericUnmarshallers, genericUnmarshaller{
+		f:               u,
+		mediaTypePrefix: mediaTypePrefix,
+	})
+	// sort with longest match first, then by prefix alphabetically
+	sort.Slice(genericUnmarshallers, func(left, right int) bool {
+		lSize := len(genericUnmarshallers[left].mediaTypePrefix)
+		rSize := len(genericUnmarshallers[right].mediaTypePrefix)
+		if lSize == rSize {
+			return genericUnmarshallers[left].mediaTypePrefix < genericUnmarshallers[right].mediaTypePrefix
+		}
+		return lSize > rSize
+	})
 	return nil
 }

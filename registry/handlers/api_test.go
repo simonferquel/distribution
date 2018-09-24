@@ -802,6 +802,7 @@ type manifestArgs struct {
 func TestManifestAPI(t *testing.T) {
 	schema1Repo, _ := reference.WithName("foo/schema1")
 	schema2Repo, _ := reference.WithName("foo/schema2")
+	genericRepo, _ := reference.WithName("foo/generic")
 
 	deleteEnabled := false
 	env1 := newTestEnv(t, deleteEnabled)
@@ -816,6 +817,10 @@ func TestManifestAPI(t *testing.T) {
 	testManifestAPISchema1(t, env2, schema1Repo)
 	schema2Args = testManifestAPISchema2(t, env2, schema2Repo)
 	testManifestAPIManifestList(t, env2, schema2Args)
+
+	env3 := newTestEnv(t, deleteEnabled)
+	defer env3.Shutdown()
+	testManifestAPIGeneric(t, env3, genericRepo)
 }
 
 // storageManifestErrDriverFactory implements the factory.StorageDriverFactory interface.
@@ -1866,6 +1871,169 @@ func testManifestAPIManifestList(t *testing.T, env *testEnv, args manifestArgs) 
 
 	// Don't check V1Compatibility fields because we're using randomly-generated
 	// layers.
+}
+
+type testGenericManifest struct {
+	manifest.Versioned
+	Refs       []distribution.Descriptor `json:"references"`
+	CustomData string                    `json:"custom_data"`
+}
+
+func testManifestAPIGeneric(t *testing.T, env *testEnv, imageName reference.Named) {
+	tag := "generic"
+	mediaType := "x-application/generic-test"
+
+	tagRef, _ := reference.WithTag(imageName, tag)
+	manifestURL, err := env.builder.BuildManifestURL(tagRef)
+	if err != nil {
+		t.Fatalf("unexpected error getting manifest url: %v", err)
+	}
+	// -----------------------------
+	// Attempt to fetch the manifest
+	resp, err := http.Get(manifestURL)
+	if err != nil {
+		t.Fatalf("unexpected error getting manifest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	checkResponse(t, "getting non-existent manifest", resp, http.StatusNotFound)
+	checkBodyHasErrorCodes(t, "getting non-existent manifest", resp, v2.ErrorCodeManifestUnknown)
+
+	tagsURL, err := env.builder.BuildTagsURL(imageName)
+	if err != nil {
+		t.Fatalf("unexpected error building tags url: %v", err)
+	}
+
+	resp, err = http.Get(tagsURL)
+	if err != nil {
+		t.Fatalf("unexpected error getting unknown tags: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Check that we get an unknown repository error when asking for tags
+	checkResponse(t, "getting unknown manifest tags", resp, http.StatusNotFound)
+	checkBodyHasErrorCodes(t, "getting unknown manifest tags", resp, v2.ErrorCodeNameUnknown)
+
+	manifest := &testGenericManifest{
+		Versioned: manifest.Versioned{
+			SchemaVersion: 2,
+			MediaType:     mediaType,
+		},
+		CustomData: "test",
+	}
+
+	resp = putManifest(t, "putting manifest no error", manifestURL, mediaType, manifest)
+	checkResponse(t, "putting manifest no error", resp, http.StatusCreated)
+	dgstRaw := resp.Header.Get("Docker-Content-Digest")
+	dgst, err := digest.Parse(dgstRaw)
+	checkErr(t, err, "building manifest url")
+	digestRef, _ := reference.WithDigest(imageName, dgst)
+	manifestDigestURL, err := env.builder.BuildManifestURL(digestRef)
+	checkErr(t, err, "building manifest url")
+
+	req, err := http.NewRequest("GET", manifestURL, nil)
+	if err != nil {
+		t.Fatalf("Error constructing request: %s", err)
+	}
+	req.Header.Set("Accept", mediaType)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error fetching manifest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	checkResponse(t, "fetching uploaded manifest", resp, http.StatusOK)
+
+	var fetchedManifest testGenericManifest
+	dec := json.NewDecoder(resp.Body)
+
+	if err := dec.Decode(&fetchedManifest); err != nil {
+		t.Fatalf("error decoding fetched manifest: %v", err)
+	}
+
+	if manifest.CustomData != fetchedManifest.CustomData {
+		t.Fatal("generic manifest content missing")
+	}
+
+	// ---------------
+	// Fetch by digest
+	req, err = http.NewRequest("GET", manifestDigestURL, nil)
+	if err != nil {
+		t.Fatalf("Error constructing request: %s", err)
+	}
+	req.Header.Set("Accept", mediaType)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error fetching manifest: %v", err)
+	}
+	defer resp.Body.Close()
+
+	checkResponse(t, "fetching uploaded manifest", resp, http.StatusOK)
+
+	dec = json.NewDecoder(resp.Body)
+
+	if err := dec.Decode(&fetchedManifest); err != nil {
+		t.Fatalf("error decoding fetched manifest: %v", err)
+	}
+
+	if manifest.CustomData != fetchedManifest.CustomData {
+		t.Fatal("generic manifest content missing")
+	}
+	etag := resp.Header.Get("Etag")
+
+	// Get by name with etag, gives 304
+	req, err = http.NewRequest("GET", manifestURL, nil)
+	if err != nil {
+		t.Fatalf("Error constructing request: %s", err)
+	}
+	req.Header.Set("If-None-Match", etag)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Error constructing request: %s", err)
+	}
+
+	checkResponse(t, "fetching manifest by name with etag", resp, http.StatusNotModified)
+
+	// Get by digest with etag, gives 304
+	req, err = http.NewRequest("GET", manifestDigestURL, nil)
+	if err != nil {
+		t.Fatalf("Error constructing request: %s", err)
+	}
+	req.Header.Set("If-None-Match", etag)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Error constructing request: %s", err)
+	}
+
+	checkResponse(t, "fetching manifest by dgst with etag", resp, http.StatusNotModified)
+
+	// Ensure that the tag is listed.
+	resp, err = http.Get(tagsURL)
+	if err != nil {
+		t.Fatalf("unexpected error getting unknown tags: %v", err)
+	}
+	defer resp.Body.Close()
+
+	checkResponse(t, "getting unknown manifest tags", resp, http.StatusOK)
+	dec = json.NewDecoder(resp.Body)
+
+	var tagsResponse tagsAPIResponse
+
+	if err := dec.Decode(&tagsResponse); err != nil {
+		t.Fatalf("unexpected error decoding error response: %v", err)
+	}
+
+	if tagsResponse.Name != imageName.Name() {
+		t.Fatalf("tags name should match image name: %v != %v", tagsResponse.Name, imageName)
+	}
+
+	if len(tagsResponse.Tags) != 1 {
+		t.Fatalf("expected some tags in response: %v", tagsResponse.Tags)
+	}
+
+	if tagsResponse.Tags[0] != tag {
+		t.Fatalf("tag not as expected: %q != %q", tagsResponse.Tags[0], tag)
+	}
 }
 
 func testManifestDelete(t *testing.T, env *testEnv, args manifestArgs) {
