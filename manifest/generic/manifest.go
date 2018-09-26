@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/opencontainers/go-digest"
 	"strings"
 
 	"github.com/docker/distribution"
 	"github.com/docker/distribution/manifest"
+	"github.com/opencontainers/go-digest"
 )
 
 const (
@@ -19,29 +19,27 @@ const (
 func init() {
 	genericFunc := func(b []byte) (distribution.Manifest, distribution.Descriptor, error) {
 		m := new(DeserializedManifest)
-		err := m.UnmarshalJSON(b)
-		if err != nil {
+		if err := m.UnmarshalJSON(b); err != nil {
 			return nil, distribution.Descriptor{}, err
 		}
 		dgst := digest.FromBytes(b)
-		return m, distribution.Descriptor{Digest: dgst, Size: int64(len(b)), MediaType: m.MediaType}, err
+		return m, distribution.Descriptor{Digest: dgst, Size: int64(len(b)), MediaType: m.MediaType}, nil
 	}
-	err := distribution.RegisterGenericManifestSchema(GenericMediaTypePrefix, genericFunc)
-	if err != nil {
+	if err := distribution.RegisterGenericManifestSchema(GenericMediaTypePrefix, genericFunc); err != nil {
 		panic(fmt.Sprintf("Unable to register manifest: %s", err))
 	}
 }
 
-// ensure that DeserializedManifest implemets distribution.Manifest
+// ensure that DeserializedManifest implements distribution.Manifest
 var _ distribution.Manifest = &DeserializedManifest{}
 
 // Manifest is a generic manifest that might contain references
 type Manifest struct {
 	manifest.Versioned
-	Refs []distribution.Descriptor `json:"references"`
+	Refs []distribution.Descriptor `json:"references,omitempty"`
 }
 
-// References returnes the descriptors of this manifests references.
+// References returns the descriptors of this manifests references.
 func (m Manifest) References() []distribution.Descriptor {
 	return m.Refs
 }
@@ -57,11 +55,11 @@ type DeserializedManifest struct {
 // FromStruct takes a Manifest structure, marshals it to JSON, and returns a
 // DeserializedManifest which contains the manifest and its JSON representation.
 func FromStruct(m interface{}) (*DeserializedManifest, error) {
-	var deserialized DeserializedManifest
-
-	var err error
-	deserialized.canonical, err = json.MarshalIndent(&m, "", "   ")
-	if err != nil {
+	var (
+		deserialized DeserializedManifest
+		err          error
+	)
+	if deserialized.canonical, err = json.MarshalIndent(&m, "", "   "); err != nil {
 		return nil, err
 	}
 	// unmarshall partially in Manifest
@@ -77,7 +75,7 @@ func (m DeserializedManifest) Payload() (string, []byte, error) {
 
 // UnmarshalJSON populates a new Manifest struct from JSON data.
 func (m *DeserializedManifest) UnmarshalJSON(b []byte) error {
-	m.canonical = make([]byte, len(b), len(b))
+	m.canonical = make([]byte, len(b))
 	// store manifest in canonical
 	copy(m.canonical, b)
 
@@ -88,7 +86,7 @@ func (m *DeserializedManifest) UnmarshalJSON(b []byte) error {
 	}
 
 	if !strings.HasPrefix(manifest.MediaType, GenericMediaTypePrefix) {
-		return fmt.Errorf("mediaType in manifest should have prefix '%s', '%s' has not",
+		return fmt.Errorf("mediaType in manifest should have prefix %q, %q has not",
 			GenericMediaTypePrefix, manifest.MediaType)
 
 	}
